@@ -855,6 +855,15 @@ static struct cpuidle_state dnv_cstates[] = {
 		.enter = NULL }
 };
 
+
+/* dtsc for timestamp measurement */
+extern inline uint64_t rdtsc_measure(void)
+{
+	uint32_t lo, hi;
+	/* We cannot use "=A", since this would use %rax on x86_64 */
+	__asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+	return (uint64_t)hi << 32 | lo;
+}
 /**
  * intel_idle
  * @dev: cpuidle_device
@@ -883,8 +892,25 @@ static int intel_idle(struct cpuidle_device *dev,
 
 	if (!(lapic_timer_reliable_states & (1 << (cstate))))
 		tick_broadcast_enter();
-
+	
+	/* Take note of the planned idle state. */
+	if(dev->measure.measure && !dev->measure.rdtsc_before[dev->measure.index]){
+		dev->measure.rdtsc_before[dev->measure.index]=rdtsc_measure();
+		dev->measure.cstate[dev->measure.index]=cstate+1;
+	}
+	
 	mwait_idle_with_hints(eax, ecx);
+
+	if(dev->measure.measure &&  !dev->measure.result[dev->measure.index]){
+		if(dev->measure.rdtsc_before[dev->measure.index]){
+			dev->measure.result[dev->measure.index]=rdtsc_measure()-dev->measure.rdtsc_before[dev->measure.index];
+		
+			dev->measure.index = (dev->measure.index + 1) % CPUIDLE_MEASUREMENTS_MAX;
+		}
+		dev->measure.cstate[dev->measure.index]=-1;
+		dev->measure.rdtsc_before[dev->measure.index]=0;
+		dev->measure.result[dev->measure.index]=0;
+	}
 
 	if (!(lapic_timer_reliable_states & (1 << (cstate))))
 		tick_broadcast_exit();

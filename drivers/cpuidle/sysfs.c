@@ -15,6 +15,7 @@
 #include <linux/capability.h>
 #include <linux/device.h>
 #include <linux/kobject.h>
+#include <linux/sched.h>
 
 #include "cpuidle.h"
 
@@ -440,6 +441,260 @@ static void cpuidle_remove_state_sysfs(struct cpuidle_device *device)
 		cpuidle_free_state_kobj(device, i);
 }
 
+
+
+struct cpuidle_measure_binary_attr {
+	struct bin_attribute attr;
+	ssize_t (*read) (struct cpuidle_measure *, char * buf, loff_t pos, size_t size);
+	ssize_t (*write) (struct cpuidle_measure *, char * buf, loff_t pos, size_t size);
+};
+
+
+struct cpuidle_measure_attr {
+	struct attribute attr;
+	ssize_t (*show) (struct cpuidle_measure *, char *);
+	ssize_t (*store) (struct cpuidle_measure *, const char *, size_t count);
+};
+
+
+
+#define define_one_measure_binary_ro(_name, _read) \
+	static struct bin_attribute bin_attr_##_name = __BIN_ATTR(_name, 0444, _read, NULL, 0)
+
+
+#define define_one_measure_ro(_name, show) \
+	static struct cpuidle_measure_attr attr_##_name = __ATTR(_name, 0444, show, NULL)
+
+/* won't compile with 0666
+ * Caused by commit 37549e94c77a ("sysfs: disallow world-writable files")
+ */
+#define define_one_measure_rw(_name, show, store) \
+	static struct cpuidle_measure_attr attr_##_name = __ATTR(_name, 0664, show, store)
+
+
+
+static ssize_t show_measure_measure(struct cpuidle_measure * measure, char * buf)
+{
+	return sprintf(buf, "%u\n", measure->measure);
+}
+
+
+static ssize_t store_measure_measure(struct cpuidle_measure * measure, const char * buf, size_t count)
+{
+	int ret, res;
+
+	ret = sscanf(buf, "%u", &res);
+	if(ret!=1)
+		return ret;
+
+	if(res) {
+		measure->measure = 1;
+		measure->index_start = measure->index;
+		if(measure->cstate[measure->index]>-1){
+			measure->rdtsc_before[measure->index]=0;
+			measure->cstate[measure->index]=-1;
+		}
+		
+	}else{
+		measure->measure = 0;
+	}
+
+	return count;
+}
+
+
+static ssize_t show_measure_index(struct cpuidle_measure * measure, char * buf)
+{
+	return sprintf(buf, "%u\n", measure->index);
+}
+
+
+static ssize_t show_measure_size(struct cpuidle_measure * measure, char * buf)
+{
+	return sprintf(buf, "%u\n", measure->size);
+}
+
+static ssize_t read_measure_result(struct file *filep, struct kobject *kobj, struct bin_attribute * bin_attr, char * buf, loff_t pos, size_t count);
+
+define_one_measure_binary_ro(result, read_measure_result);
+define_one_measure_ro(index, show_measure_index);
+define_one_measure_ro(size, show_measure_size);
+define_one_measure_rw(measure, show_measure_measure, store_measure_measure);
+
+
+struct cpuidle_measure_kobj {
+	struct cpuidle_measure * measure;
+	struct completion kobj_unregister;
+	struct kobject kobj;
+	struct bin_attribute * result_attr;
+	char bin_data[CPUIDLE_MEASUREMENTS_MAX*(20+20+10+4)];
+};
+
+static struct attribute *cpuidle_measure_default_attrs[] = {
+	
+	&attr_measure.attr,
+	&attr_index.attr,
+	&attr_size.attr,
+	NULL
+};
+
+#define attr_to_measureattr(a) container_of(a, struct cpuidle_measure_attr, attr)
+
+
+
+
+static inline struct cpuidle_measure *to_cpuidle_measure(struct kobject *kobj)
+{
+	struct cpuidle_measure_kobj *kmeasure =
+		container_of(kobj, struct cpuidle_measure_kobj, kobj);
+
+	return kmeasure->measure;
+}
+
+static inline struct cpuidle_measure_kobj *to_cpuidle_measure_kobj(struct kobject *kobj)
+{
+	struct cpuidle_measure_kobj *kmeasure =
+		container_of(kobj, struct cpuidle_measure_kobj, kobj);
+
+	return kmeasure;
+}
+
+static size_t set_measure_bin_data(struct cpuidle_measure_kobj *kmeasure){
+	
+	ssize_t length = 0;
+	int i;
+	memset(&kmeasure->bin_data, 0, sizeof(kmeasure->bin_data));
+	for(i=0; i<CPUIDLE_MEASUREMENTS_MAX; i++){
+		length += sprintf(kmeasure->bin_data + length, "%llu,", kmeasure->measure->rdtsc_before[i]);
+		length += sprintf(kmeasure->bin_data + length, "%llu,", kmeasure->measure->result[i]);
+		length += sprintf(kmeasure->bin_data + length, "%i\n", kmeasure->measure->cstate[i]);
+	}
+	return length;
+}
+
+static ssize_t read_measure_result(struct file *filep, struct kobject *kobj, struct bin_attribute * bin_attr, char * buf, loff_t pos, size_t count)
+{
+	ssize_t length = 0;	
+	int ret;
+	struct cpuidle_measure_kobj *kmeasure = to_cpuidle_measure_kobj(kobj);
+	if(!pos)
+		length = set_measure_bin_data(kmeasure);
+	
+	ret = memory_read_from_buffer(buf, count, &pos, kmeasure->bin_data, sizeof(kmeasure->bin_data)); 
+	return ret;
+}
+
+
+static ssize_t cpuidle_measure_show(struct kobject * kobj,
+		struct attribute * attr, char * buf)
+{
+	int ret = -EIO;
+	struct cpuidle_measure *measure = to_cpuidle_measure(kobj);
+	struct cpuidle_measure_attr * cattr = attr_to_measureattr(attr);
+
+	if (cattr->show)
+		ret = cattr->show(measure, buf);
+
+	return ret;
+}
+
+static ssize_t cpuidle_measure_store(struct kobject * kobj, struct
+		attribute * attr, const char * buf, size_t count)
+{
+	int ret = -EIO;
+	struct cpuidle_measure *measure = to_cpuidle_measure(kobj);
+	struct cpuidle_measure_attr * cattr = attr_to_measureattr(attr);
+
+	if (cattr->store)
+		ret = cattr->store(measure, buf, count);
+
+	return ret;
+}
+
+static const struct sysfs_ops cpuidle_measure_sysfs_ops = {
+	.show = cpuidle_measure_show,
+	.store = cpuidle_measure_store,
+};
+
+static void cpuidle_measure_sysfs_release(struct kobject *kobj)
+{
+	struct cpuidle_measure_kobj *measure_obj = 
+		container_of(kobj, struct cpuidle_measure_kobj, kobj);
+
+	complete(&measure_obj->kobj_unregister);
+}
+
+static struct kobj_type ktype_measure_cpuidle = {
+	.sysfs_ops = &cpuidle_measure_sysfs_ops,
+	.default_attrs = cpuidle_measure_default_attrs,
+	.release = cpuidle_measure_sysfs_release,
+};
+
+static inline void cpuidle_free_measure_kobj(struct cpuidle_device *device)
+{
+	
+	sysfs_remove_bin_file(&device->measure_kobj->kobj, &bin_attr_result);
+	kobject_put(&device->measure_kobj->kobj);
+	wait_for_completion(&device->measure_kobj->kobj_unregister);
+	kfree(device->measure_kobj);
+	device->measure_kobj = NULL;
+
+
+}
+
+
+int cpuidle_add_measure_sysfs(struct cpuidle_device *device)
+{
+	int ret = -ENOMEM;
+	struct cpuidle_device_kobj *kdev = device->kobj_dev;
+	struct cpuidle_measure_kobj *kobj;
+
+	kobj = kzalloc(sizeof(struct cpuidle_measure_kobj), GFP_KERNEL);
+	if(!kobj){	
+		cpuidle_free_measure_kobj(device);
+		return ret;
+	}
+	
+	
+	kobj->result_attr = kzalloc(sizeof(struct bin_attribute), GFP_KERNEL);
+	if(!kobj){	
+		cpuidle_free_measure_kobj(device);
+		return ret;
+	}
+
+	kobj->measure = &device->measure;
+	
+	init_completion(&kobj->kobj_unregister);
+
+	ret = kobject_init_and_add(&kobj->kobj, &ktype_measure_cpuidle, &kdev->kobj,
+			"measure");
+
+	if (ret) {
+		kfree(kobj);
+		sysfs_remove_bin_file(&kobj->kobj, &bin_attr_result);	
+		cpuidle_free_measure_kobj(device);
+		return ret;
+	}
+	kobject_uevent(&kobj->kobj, KOBJ_ADD);
+	device->measure_kobj = kobj;
+	ret = sysfs_create_bin_file(&kobj->kobj, &bin_attr_result);
+	if(ret){	
+		sysfs_remove_bin_file(&kobj->kobj, &bin_attr_result);
+		cpuidle_free_measure_kobj(device);
+		return ret;	
+	}
+	kobj->result_attr = &bin_attr_result;
+	return 0;
+
+}
+
+void cpuidle_remove_measure_sysfs(struct cpuidle_device *device)
+{
+	cpuidle_free_measure_kobj(device);
+}
+
+
+
 #ifdef CONFIG_CPU_IDLE_MULTIPLE_DRIVERS
 #define kobj_to_driver_kobj(k) container_of(k, struct cpuidle_driver_kobj, kobj)
 #define attr_to_driver_attr(a) container_of(a, struct cpuidle_driver_attr, attr)
@@ -590,6 +845,12 @@ int cpuidle_add_device_sysfs(struct cpuidle_device *device)
 	ret = cpuidle_add_driver_sysfs(device);
 	if (ret)
 		cpuidle_remove_state_sysfs(device);
+
+	ret = cpuidle_add_measure_sysfs(device);
+	if (ret)
+		cpuidle_remove_measure_sysfs(device);
+
+	
 	return ret;
 }
 
@@ -601,6 +862,7 @@ void cpuidle_remove_device_sysfs(struct cpuidle_device *device)
 {
 	cpuidle_remove_driver_sysfs(device);
 	cpuidle_remove_state_sysfs(device);
+	cpuidle_remove_measure_sysfs(device);
 }
 
 /**

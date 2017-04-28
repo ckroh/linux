@@ -18,6 +18,7 @@
 #define CPUIDLE_STATE_MAX	10
 #define CPUIDLE_NAME_LEN	16
 #define CPUIDLE_DESC_LEN	32
+#define CPUIDLE_MEASUREMENTS_MAX	1024
 
 struct module;
 
@@ -28,6 +29,27 @@ struct cpuidle_driver;
 /****************************
  * CPUIDLE DEVICE INTERFACE *
  ****************************/
+
+struct cpuidle_measure {
+	// whether to write rdtsc after mwait
+	unsigned int measure;
+	//index of current measurement
+	unsigned int index;
+	//index at start of measurement
+	unsigned int index_start;
+	//size of buffer
+	unsigned int size;
+	//id of the cpu device; neede for waking up
+	unsigned int cpuid;
+	// cstate
+	int cstate[CPUIDLE_MEASUREMENTS_MAX];
+	// before rdtsc
+	unsigned long long rdtsc_before[CPUIDLE_MEASUREMENTS_MAX];
+	// result rdtsc
+	unsigned long long result[CPUIDLE_MEASUREMENTS_MAX];
+};
+
+
 
 struct cpuidle_state_usage {
 	unsigned long long	disable;
@@ -70,6 +92,8 @@ struct cpuidle_state {
 struct cpuidle_device_kobj;
 struct cpuidle_state_kobj;
 struct cpuidle_driver_kobj;
+struct cpuidle_measure_kobj;
+struct cpuidle_measure_index_kobj;
 
 struct cpuidle_device {
 	unsigned int		registered:1;
@@ -81,6 +105,10 @@ struct cpuidle_device {
 	struct cpuidle_state_kobj *kobjs[CPUIDLE_STATE_MAX];
 	struct cpuidle_driver_kobj *kobj_driver;
 	struct cpuidle_device_kobj *kobj_dev;
+	
+	struct cpuidle_measure measure;
+	struct cpuidle_measure_kobj *measure_kobj;
+
 	struct list_head 	device_list;
 
 #ifdef CONFIG_ARCH_NEEDS_CPU_IDLE_COUPLED

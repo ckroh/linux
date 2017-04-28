@@ -192,6 +192,9 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 	}
 
 	/* Take note of the planned idle state. */
+/*	if(dev->measure.measure && index>0 && !dev->measure.rdtsc_before[dev->measure.index]){*/
+/*		dev->measure.rdtsc_before[dev->measure.index]=rdtsc_measure();*/
+/*	}*/
 	sched_idle_set_state(target_state);
 
 	trace_cpu_idle_rcuidle(index, dev->cpu);
@@ -199,9 +202,26 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 
 	stop_critical_timings();
 	entered_state = target_state->enter(dev, drv, index);
+/*	if(dev->measure.measure && index>0 && dev->measure.rdtsc_before[dev->measure.index]){*/
+/*		dev->measure.cstate[dev->measure.index]=entered_state;*/
+/*		printk("MEASURE: cpu state index %u with entered state %u\n",index, entered_state);*/
+/*	}*/
 	start_critical_timings();
 
 	time_end = ns_to_ktime(local_clock());
+
+/*	if(dev->measure.measure && entered_state==0 && !dev->measure.result[dev->measure.index]){*/
+/*		if(dev->measure.rdtsc_before[dev->measure.index]){*/
+/*			dev->measure.result[dev->measure.index]=rdtsc_measure()-dev->measure.rdtsc_before[dev->measure.index];*/
+/*			//printk("MEASURE: waking cpu %u up from cstate %u took %llu clocks\n",dev->cpu,next_state,dev->measure.result);*/
+/*		*/
+/*			dev->measure.index = (dev->measure.index + 1) % CPUIDLE_MEASUREMENTS_MAX;*/
+/*		}*/
+/*		dev->measure.cstate[dev->measure.index]=0;*/
+/*		dev->measure.rdtsc_before[dev->measure.index]=0;*/
+/*		dev->measure.result[dev->measure.index]=0;*/
+/*	}*/
+
 	trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, dev->cpu);
 
 	/* The cpu is no longer idle or about to enter idle. */
@@ -452,7 +472,7 @@ static void __cpuidle_device_init(struct cpuidle_device *dev)
  */
 static int __cpuidle_register_device(struct cpuidle_device *dev)
 {
-	int ret;
+	int ret,i;
 	struct cpuidle_driver *drv = cpuidle_get_cpu_driver(dev);
 
 	if (!try_module_get(drv->owner))
@@ -464,8 +484,19 @@ static int __cpuidle_register_device(struct cpuidle_device *dev)
 	ret = cpuidle_coupled_register_device(dev);
 	if (ret)
 		__cpuidle_unregister_device(dev);
-	else
+	else {
+		dev->measure.measure=0;
+		dev->measure.index=0;
+		dev->measure.size=CPUIDLE_MEASUREMENTS_MAX;
+		dev->measure.cpuid=dev->cpu;
+		
+		for(i=0; i<CPUIDLE_MEASUREMENTS_MAX; i++){
+			dev->measure.result[i]=0;
+			dev->measure.rdtsc_before[i]=0;
+			dev->measure.cstate[i]=-1;
+		}
 		dev->registered = 1;
+	}
 
 	return ret;
 }
